@@ -5,14 +5,23 @@ module RBHive
     attr_reader :schema
   
     TYPES = { 
-      :boolean  => :to_s,
-      :string   => :to_s,
-      :bigint   => :to_i,
-      :float    => :to_f,
-      :double   => :to_f,
-      :int      => :to_i,
-      :smallint => :to_i,
-      :tinyint  => :to_i,
+      :BOOLEAN_TYPE => :to_s,
+      :TINYINT_TYPE => :to_i,
+      :SMALLINT_TYPE => :to_i,
+      :INT_TYPE => :to_i,
+      :BIGINT_TYPE => :to_i,
+      :FLOAT_TYPE => :to_f,
+      :DOUBLE_TYPE => :to_f,
+      :STRING_TYPE => :to_s,
+      :TIMESTAMP_TYPE => :to_s,
+      :BINARY_TYPE => :to_s,
+      :ARRAY_TYPE => :to_s,
+      :MAP_TYPE => :to_s,
+      :STRUCT_TYPE => :to_s,
+      :UNION_TYPE => :to_s,
+      :USER_DEFINED_TYPE => :to_s,
+      :DECIMAL_TYPE => :to_f
+      
     }
   
     def initialize(schema, example_row)
@@ -22,7 +31,8 @@ module RBHive
   
     def column_names
       @column_names ||= begin
-        schema_names = @schema.fieldSchemas.map {|c| c.name }
+        #schema_names = @schema.fieldSchemas.map {|c| c.name }
+        schema_names = @schema.columns.map(&:columnName)
         
         # In rare cases Hive can return two identical column names
         # consider SELECT a.foo, b.foo...
@@ -47,9 +57,11 @@ module RBHive
   
     def column_type_map
       @column_type_map ||= column_names.inject({}) do |hsh, c| 
-        definition = @schema.fieldSchemas.find {|s| s.name.to_sym == c }
+        definition = @schema.columns.find {|s| s.columnName.to_sym == c }
+
+        
         # If the column isn't in the schema (eg partitions in SELECT * queries) assume they are strings
-        hsh[c] = definition ? definition.type.to_sym : :string
+        hsh[c] = definition ? TTypeId::VALUE_MAP[definition.typeDesc.types.map(&:primitiveEntry).map(&:type)[0]].to_sym : :string
         hsh
       end
     end
@@ -65,8 +77,8 @@ module RBHive
       type = column_type_map[column_name]
       return 1.0/0.0 if(type != :string && value == "Infinity")
       return 0.0/0.0 if(type != :string && value == "NaN")
-      return nil if value.nil? || value == 'NULL' || value == 'null'
-      return coerce_complex_value(value) if type.to_s =~ /^array/
+      return nil if value.nil? || value.downcase == 'null'
+      return coerce_complex_value(value) if type.to_s =~ /^ARRAY_TYPE/
       conversion_method = TYPES[type]
       conversion_method ? value.send(conversion_method) : value
     end
@@ -78,7 +90,7 @@ module RBHive
     def coerce_complex_value(value)
       return nil if value.nil?
       return nil if value.length == 0
-      return nil if value == 'null'
+      return nil if value.downcase == 'null'
       JSON.parse(value)
     end
   end

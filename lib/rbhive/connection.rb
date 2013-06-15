@@ -26,25 +26,34 @@ module RBHive
      end
    end
   end
-  
+
   class Connection
     attr_reader :client
     
     def initialize(server, port=10_000, logger=StdOutLogger.new)
-      @socket = Thrift::Socket.new(server, port)
-      @transport = Thrift::BufferedTransport.new(@socket)
+      @transport = Thrift::Socket.new(server,10_000)
       @protocol = Thrift::BinaryProtocol.new(@transport)
-      @client = ThriftHive::Client.new(@protocol)
+      @client = TCLIService::Client.new(@protocol)
       @logger = logger
       @logger.info("Connecting to #{server} on port #{port}")
-      @mutex = Mutex.new
+      @mutex = Mutex.new 
     end
     
     def open
-      @transport.open
+      @transport.open 
+      
+      #### TCLI specific requirements
+      @open_req = TOpenSessionReq.new
+      @open_resp = @client.OpenSession(@open_req)
+      @sessHandle = @open_resp.sessionHandle
     end
     
     def close
+      @close_req = TCloseOperationReq.new(:operationHandle => @stmtHandle)
+      @client.CloseOperation(@close_req)
+
+      @closeConnectionReq = TCloseSessionReq.new(:sessionHandle => @sessHandle)
+      @client.CloseSession(@closeConnectionReq)
       @transport.close
     end
     
@@ -59,7 +68,7 @@ module RBHive
     def explain(query)
       safe do
         execute_unsafe("EXPLAIN "+ query)
-        ExplainResult.new(client.fetchAll)
+        ExplainResult.new(fetchAll)
       end
     end
     
@@ -73,14 +82,14 @@ module RBHive
     
     def set(name,value)
       @logger.info("Setting #{name}=#{value}")
-      client.execute("SET #{name}=#{value}")
+      execute_safe("SET #{name}=#{value}")
     end
     
     def fetch(query)
       safe do
         execute_unsafe(query)
-        rows = client.fetchAll
-        the_schema = SchemaDefinition.new(client.getSchema, rows.first)
+        rows = fetchAll
+        the_schema = SchemaDefinition.new(get_schema, rows.first)
         ResultSet.new(rows, the_schema)
       end
     end
@@ -88,8 +97,8 @@ module RBHive
     def fetch_in_batch(query, batch_size=1_000)
       safe do
         execute_unsafe(query)
-        until (next_batch = client.fetchN(batch_size)).empty?
-          the_schema ||= SchemaDefinition.new(client.getSchema, next_batch.first)
+        until (next_batch = fetchAll(batch_size)).empty?
+          the_schema ||= SchemaDefinition.new(get_schema, next_batch.first)
           yield ResultSet.new(next_batch, the_schema)
         end
       end
@@ -98,14 +107,14 @@ module RBHive
     def first(query)
       safe do
         execute_unsafe(query)
-        row = client.fetchOne
-        the_schema = SchemaDefinition.new(client.getSchema, row)
+        row = fetchOne
+        the_schema = SchemaDefinition.new(get_schema, row)
         ResultSet.new([row], the_schema).first
       end
     end
     
     def schema(example_row=[])
-      safe { SchemaDefinition.new(client.getSchema, example_row) }
+      safe { SchemaDefinition.new(get_schema, example_row) }
     end
     
     def create_table(schema)
@@ -137,7 +146,38 @@ module RBHive
     
     def execute_unsafe(query)
       @logger.info("Executing Hive Query: #{query}")
-      client.execute(query)
+
+      @execReq = TExecuteStatementReq.new :sessionHandle => @sessHandle, :statement => query
+      @execResp = @client.ExecuteStatement(@execReq)
+      @stmtHandle = @execResp.operationHandle
+      
+    end
+
+    ### new thrift implementation requres a max row count. I didn't know exactly what to put, so I used the max limit
+    def fetchAll(maxrows=(2**31)-1)
+
+      ret = nil 
+      if @execResp.operationHandle.hasResultSet
+        @fetchReq = TFetchResultsReq.new :operationHandle => @stmtHandle, :orientation => 4, :maxRows => maxrows
+        @resultsResp = @client.FetchResults @fetchReq
+        @resultsSet = @resultsResp.results
+        @resultRows = @resultsSet.rows
+
+        ### there are definitely better ways of doing this, but this seemed like the easiest quick fix - emulates existing rbhive gem
+        ret = @resultRows.map(&:colVals).map{ |x| x.map(&:get_value).map(&:value).join(sep="\t")} 
+      end
+
+      ret
+    end
+
+    def fetchOne
+      fetchAll(1)
+    end
+
+    def get_schema
+      metadataReq = TGetResultSetMetadataReq.new :operationHandle => @stmtHandle
+      metadataResp = @client.GetResultSetMetadata metadataReq
+      metadataResp.schema
     end
     
     def safe
